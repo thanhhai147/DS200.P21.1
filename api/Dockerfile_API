@@ -1,0 +1,16 @@
+# api/Dockerfile_API
+FROM python:3.9-slim-buster
+WORKDIR /app
+
+# Copy requirements.txt (now relative to project root)
+COPY api/requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy the data folder (now relative to project root)
+COPY data /app/data/
+
+# Copy the API Python code (now relative to project root)
+COPY api/data_source_api.py .
+
+EXPOSE 5000
+CMD ["uvicorn", "data_source_api:app", "--host", "0.0.0.0", "--port", "5000"]
