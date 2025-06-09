@@ -1,10 +1,12 @@
-# spark_jobs/process_test_data.py (UPDATED for composite labels)
+# spark_jobs/process_test_data.py (UPDATED for dashboard output)
 from pyspark.sql import SparkSession
+import pyspark.sql.functions as F
 from pyspark.sql.functions import from_json, col, current_timestamp, udf
 from pyspark.sql.types import StructType, StructField, StringType, DoubleType, IntegerType, TimestampType
 from pyspark.ml import PipelineModel
 import logging
 import uuid
+import os # Added for path operations
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -25,7 +27,7 @@ test_data_kafka_schema = StructType([
     StructField("comment", StringType(), True),
     StructField("n_star", IntegerType(), True),
     StructField("date_time", StringType(), True),
-    StructField("label", StringType(), True), # Test data might or might not have a label
+    StructField("label", StringType(), True), # Crucial for carrying true label through for dashboard
 ])
 
 # UDF to generate a UUID
@@ -60,24 +62,31 @@ parsed_test_df = kafka_df.selectExpr("CAST(value AS STRING)") \
     .withColumn("processing_timestamp", current_timestamp())
 
 # --- Make Predictions using the Loaded Model ---
-# The model.transform method will apply all pipeline stages (tokenization, featurization, prediction)
+# The model.transform method will apply all pipeline stages
+# (tokenization, featurization, prediction, probability generation, and IndexToString for string label)
 predictions_df = model.transform(parsed_test_df)
 
+# --- DEBUGGING AID: Print schema to confirm columns from model (very useful) ---
+logger.info("Schema of predictions_df after model.transform():")
+predictions_df.printSchema()
+# --- END DEBUGGING AID ---
+
 # Select and format data for output to predicted_test_data Kafka topic
-# The 'predicted_composite_label' will be the output from the model
 output_df = predictions_df.select(
-    col("id").alias("record_id"),
-    col("comment"),
-    col("n_star"),
-    col("date_time"),
-    col("label").alias("original_raw_label"), # Keep original raw label from test data
-    col("predicted_composite_label"), # This is the model's prediction of the composite label
-    col("probability")[1].alias("positive_class_probability"), # Probability of the predicted label being the positive class (if binary)
-    col("processing_timestamp")
+    "id",
+    "comment",
+    "n_star",
+    "date_time",
+    "label", # Original true label from incoming Kafka data for comparison on dashboard
+    F.col("prediction").alias("predicted_label_index"), # The raw prediction index (0 or 1)
+    F.col("predicted_composite_label").alias("predicted_sentiment_string"), # Human-readable predicted label (e.g., "positive", "negative")
+    "rawPrediction", # rawPrediction vector (e.g., [score_neg, score_pos])
+    # F.col("probability.values")[1].alias("positive_probability") # Probability of the positive class (from the 'values' array in the probability vector)
 )
 
 # Convert the DataFrame to JSON strings for Kafka output
-output_kafka_df = output_df.selectExpr("CAST(record_id AS STRING) AS key", "to_json(struct(*)) AS value")
+# All selected columns will be included in the JSON message.
+output_kafka_df = output_df.selectExpr("CAST(id AS STRING) AS key", "to_json(struct(*)) AS value")
 
 # Define output Kafka topic for predictions
 PREDICTED_KAFKA_TOPIC = "predicted_test_data"
@@ -89,11 +98,15 @@ query_predictions = output_kafka_df \
     .format("kafka") \
     .option("kafka.bootstrap.servers", "kafka:29092") \
     .option("topic", PREDICTED_KAFKA_TOPIC) \
-    .option("checkpointLocation", "/tmp/spark/checkpoints/predictions_to_kafka") \
-    .trigger(processingTime="5 seconds") \
+    .option("checkpointLocation", os.path.join("/tmp/spark/checkpoints", PREDICTED_KAFKA_TOPIC)) \
+    .trigger(processingTime="10 seconds") \
     .start()
 
 logger.info("Spark Structured Streaming query for predictions started.")
 
 # Await termination of the query
 query_predictions.awaitTermination()
+
+# Stop Spark Session
+spark.stop()
+logger.info("Spark Session stopped.")
