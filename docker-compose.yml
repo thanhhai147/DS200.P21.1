@@ -11,6 +11,8 @@ services:
     environment:
       ZOOKEEPER_CLIENT_PORT: 2181
       ZOOKEEPER_TICK_TIME: 2000
+    networks:
+      - spark-net
     healthcheck:
       test: ["CMD", "sh", "-c", "nc -z localhost 2181"]
       interval: 10s
@@ -27,19 +29,23 @@ services:
     environment:
       KAFKA_BROKER_ID: 1
       KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
       KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+    networks:
+      - spark-net
     depends_on:
       zookeeper:
         condition: service_healthy
-    healthcheck:
-      test: ["CMD", "kafka-topics", "--bootstrap-server", "localhost:9092", "--list"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
+    # healthcheck: # ADDED HEALTHCHECK FOR KAFKA HERE
+    #   test: ["CMD-SHELL", "kafka-broker-api-versions.sh --bootstrap-server localhost:9092 || exit 1"]
+    #   interval: 10s
+    #   timeout: 5s
+    #   retries: 10 # Kafka can take a bit to start up, increased retries
+    #   start_period: 60s # Give it initial time to start before checking
 
   # --- Cassandra Database ---
   cassandra:
@@ -55,13 +61,15 @@ services:
       CASSANDRA_RACK: 'rack1'
     volumes:
       - cassandra_data:/var/lib/cassandra
-    healthcheck:
-      test: ["CMD-SHELL", "cqlsh --debug cassandra -e 'describe cluster;'"]
-      interval: 30s
-      timeout: 10s
-      retries: 5
-      start_period: 120s
+    networks:
+      - spark-net
     restart: always
+    healthcheck: # Healthcheck for Cassandra
+      test: ["CMD-SHELL", "cqlsh --debug localhost 9042 -e 'DESCRIBE KEYSPACES;' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10 # Cassandra can take a while to become fully available
+      start_period: 60s # Give it initial time to start
 
   # --- Spark Master ---
   spark-master:
@@ -84,6 +92,8 @@ services:
       SPARK_RPC_ENCRYPTION_ENABLED: "no"
       SPARK_LOCAL_DIRS: /tmp/spark
       SPARK_LOG_LEVEL: INFO # Or WARN/ERROR for less verbosity
+    networks:
+      - spark-net
     volumes:
       - ./spark_jobs:/opt/bitnami/spark/jobs # Mount your Spark jobs
       - ./data:/opt/bitnami/spark/data # Mount your data folder for Spark access
@@ -114,17 +124,11 @@ services:
       SPARK_RPC_ENCRYPTION_ENABLED: "no"
       SPARK_LOCAL_DIRS: /tmp/spark
       SPARK_LOG_LEVEL: INFO
+    networks:
+      - spark-net
     volumes:
       - ./spark_jobs:/opt/bitnami/spark/jobs
       - ./data:/opt/bitnami/spark/data
-    # depends_on:
-    #   spark-master:
-    #     condition: service_healthy # Re-enabled depends_on
-    # healthcheck:
-    #   test: ["CMD-SHELL", "wget -q -O /dev/null http://spark-master:8080"] # Re-enabled healthcheck
-    #   interval: 10s
-    #   timeout: 5s
-    #   retries: 5
 
   # --- Spark Worker 2 ---
   spark-worker-2: # New worker service
@@ -146,17 +150,11 @@ services:
       SPARK_RPC_ENCRYPTION_ENABLED: "no"
       SPARK_LOCAL_DIRS: /tmp/spark
       SPARK_LOG_LEVEL: INFO
+    networks:
+      - spark-net
     volumes:
       - ./spark_jobs:/opt/bitnami/spark/jobs
       - ./data:/opt/bitnami/spark/data
-    # depends_on:
-    #   spark-master:
-    #     condition: service_healthy
-    # healthcheck:
-    #   test: ["CMD-SHELL", "wget -q -O /dev/null http://spark-master:8080"]
-    #   interval: 10s
-    #   timeout: 5s
-    #   retries: 5
 
   # --- Spark Worker 3 ---
   spark-worker-3: # New worker service
@@ -178,17 +176,44 @@ services:
       SPARK_RPC_ENCRYPTION_ENABLED: "no"
       SPARK_LOCAL_DIRS: /tmp/spark
       SPARK_LOG_LEVEL: INFO
+    networks:
+      - spark-net
     volumes:
       - ./spark_jobs:/opt/bitnami/spark/jobs
       - ./data:/opt/bitnami/spark/data
-    # depends_on:
-    #   spark-master:
-    #     condition: service_healthy
-    # healthcheck:
-    #   test: ["CMD-SHELL", "wget -q -O /dev/null http://spark-master:8080"]
-    #   interval: 10s
-    #   timeout: 5s
-    #   retries: 5
+
+  spark-train-ingestion:
+    image: bitnami/spark:3.5.0
+    container_name: spark-train-ingestion
+    environment:
+      - SPARK_MASTER_URL=spark://spark-master:7077
+    volumes:
+      - ./spark_jobs:/opt/bitnami/spark/jobs
+    networks:
+      - spark-net
+    restart: on-failure
+
+  continuous-model-trainer:
+    image: bitnami/spark:3.5.0
+    container_name: continuous-model-trainer
+    environment:
+      - SPARK_MASTER_URL=spark://spark-master:7077
+    volumes:
+      - ./spark_jobs:/opt/bitnami/spark/jobs
+    networks:
+      - spark-net
+    restart: on-failure
+
+  spark-test-processor:
+    image: bitnami/spark:3.5.0
+    container_name: spark-test-processor
+    environment:
+      - SPARK_MASTER_URL=spark://spark-master:7077
+    volumes:
+      - ./spark_jobs:/opt/bitnami/spark/jobs
+    networks:
+      - spark-net
+    restart: on-failure
 
   api:
     build:
@@ -200,7 +225,9 @@ services:
       - "5000:5000"
     volumes:
       - ./data:/app/data
-    restart: always
+    networks:
+      - spark-net
+    restart: on-failure
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
       interval: 10s
@@ -217,22 +244,28 @@ services:
     ports:
       - "8501:8501" # Default Streamlit port
     depends_on:
-      kafka:
-        condition: service_healthy
-    restart: always
+      - kafka
+    networks:
+      - spark-net
+    restart: on-failure
 
   cassandra-setup:
     build:
-      context: ./db_setup # Build from the db_setup directory
-      dockerfile: Dockerfile_CassandraSetup # Specify custom Dockerfile name
+      context: ./db_setup 
+      dockerfile: Dockerfile_CassandraSetup
     container_name: cassandra-setup
     depends_on:
       cassandra:
-        condition: service_healthy # Ensure Cassandra is ready before running setup
-    restart: "no" # Only run once and exit
+        condition: service_healthy 
+    restart: "on-failure"
     volumes:
-      # Optional: Mount your db_setup directory if you want to make changes without rebuilding image
       - ./db_setup:/app
+    networks:
+      - spark-net
+
+networks:
+  spark-net:
+    driver: bridge
 
 volumes:
   cassandra_data: # For Cassandra persistent data

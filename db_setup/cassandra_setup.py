@@ -15,7 +15,7 @@ CASSANDRA_PASSWORD = None
 
 KEYSPACE_NAME = "my_project_keyspace"
 TRAIN_DATA_TABLE = "raw_train_data"
-TEST_DATA_TABLE = "raw_test_data"
+TEST_DATA_TABLE = "predicted_data_results"
 
 def create_cassandra_schema():
     cluster = None
@@ -45,12 +45,12 @@ def create_cassandra_schema():
             # Create raw_train_data table
             train_table_query = f"""
             CREATE TABLE IF NOT EXISTS {TRAIN_DATA_TABLE} (
-                id text PRIMARY KEY,        -- Generated unique ID for each record
+                id UUID PRIMARY KEY,
                 comment text,
                 n_star int,
-                date_time timestamp,        -- Store as timestamp after parsing
+                date_time timestamp,
                 label text,
-                processing_timestamp timestamp -- Timestamp when Spark processed it
+                ingestion_timestamp timestamp
             );
             """
             session.execute(train_table_query)
@@ -59,11 +59,15 @@ def create_cassandra_schema():
             # Create raw_test_data table
             test_table_query = f"""
             CREATE TABLE IF NOT EXISTS {TEST_DATA_TABLE} (
-                id text PRIMARY KEY,        -- Generated unique ID for each record
+                id UUID PRIMARY KEY,
                 comment text,
                 n_star int,
                 date_time timestamp,
-                label text,                 -- Test data might or might not have a ground truth label
+                label text,
+                predicted_label_index int,
+                predicted_sentiment_string text,
+                positive_probability double,
+                rawPrediction text,
                 processing_timestamp timestamp
             );
             """
