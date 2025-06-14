@@ -65,7 +65,7 @@ def train_and_save_model(batch_df, batch_id):
 
         num_records_for_training = train_df.count()
         if num_records_for_training == 0:
-            logger.warn(f"Batch {batch_id}: No training data available in Cassandra. Skipping retraining.")
+            logger.warning(f"Batch {batch_id}: No training data available in Cassandra. Skipping retraining.")
             return
 
         logger.info(f"Batch {batch_id}: Training model using {num_records_for_training} records from Cassandra.")

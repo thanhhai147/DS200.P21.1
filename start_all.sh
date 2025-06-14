@@ -5,10 +5,11 @@
 echo "--- Building and Starting Docker Compose Services ---"
 # Stops and removes old containers/volumes if they exist, then builds and starts
 docker-compose down --rmi all -v --remove-orphans # Clean shutdown
+docker system prune -a
 docker-compose up -d --build
 
 echo "--- Waiting for core services (Kafka, Cassandra, Spark Master) to be healthy ---"
-for i in {1..5}; do # 
+for i in {1..5}; do 
   KAFKA_HEALTH=$(docker-compose inspect --format '{{.State.Health.Status}}' kafka 2>/dev/null)
   CASSANDRA_HEALTH=$(docker-compose inspect --format '{{.State.Health.Status}}' cassandra 2>/dev/null)
   echo "$KAFKA_HEALTH"

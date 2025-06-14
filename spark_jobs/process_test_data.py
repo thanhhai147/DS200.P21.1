@@ -3,7 +3,7 @@
 from pyspark.sql import SparkSession
 import pyspark.sql.functions as F
 from pyspark.sql.functions import from_json, col, current_timestamp, udf
-from pyspark.sql.types import StructType, StructField, StringType, DoubleType, IntegerType, TimestampType, FloatType
+from pyspark.sql.types import StructType, StructField, StringType, DoubleType, IntegerType, TimestampType, FloatType # Added IntegerType
 from pyspark.ml import PipelineModel
 from pyspark.ml.evaluation import MulticlassClassificationEvaluator
 from datetime import datetime
@@ -11,6 +11,21 @@ import logging
 import uuid
 import os
 import time # For checking file modification time
+from pyspark.ml.linalg import Vector # Make sure this import is present at the top
+# from pyspark.sql.types import DoubleType # For the UDF return type (already imported above)
+
+# Define a UDF to extract the positive probability (assuming it's at index 1)
+# This UDF will receive the pyspark.ml.linalg.Vector object directly
+@udf(DoubleType())
+def get_positive_probability_udf(vec: Vector) -> float:
+    if vec is None:
+        return None
+    # Assuming the positive class probability is at index 1 of the probability vector
+    # Spark ML classifiers typically output probabilities for each class,
+    # with the index corresponding to the indexed label (e.g., 0 for negative, 1 for positive, 2 for neutral)
+    if len(vec) > 1: # Ensure the vector has at least two elements
+        return float(vec[1])
+    return None # Or handle as appropriate if vector is too short
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -108,7 +123,7 @@ kafka_df = spark \
 parsed_test_df = kafka_df.selectExpr("CAST(value AS STRING)") \
     .select(from_json(col("value"), test_data_kafka_schema).alias("data")) \
     .select("data.*") \
-    .withColumn("id", col("id")) # Use ID from producer
+    .withColumn("id", col("id")) \
     .withColumn("date_time", col("date_time").cast(TimestampType())) \
     .withColumn("processing_timestamp", current_timestamp())
 
@@ -142,10 +157,12 @@ def process_batch_with_model(batch_df, batch_id):
             "n_star",
             "date_time",
             "label", # True label (from Kafka input)
-            F.col("prediction").alias("predicted_label_index"), # Numeric predicted label
+            # Corrected: Cast prediction to IntegerType to match Cassandra's 'int'
+            F.col("prediction").cast(IntegerType()).alias("predicted_label_index"),
             F.col("predicted_composite_label").alias("predicted_sentiment_string"), # Human-readable predicted label
-            F.col("rawPrediction").cast(StringType()).alias("rawPrediction"), # Convert vector to string for Cassandra
-            F.col("probability.values")[1].alias("positive_probability"), # Positive class probability
+            F.col("rawPrediction").cast(StringType()).alias("raw_prediction"), # Convert vector to string for Cassandra
+            # Using the new UDF for positive_probability
+            # get_positive_probability_udf(F.col("probability")).alias("positive_probability"),
             "processing_timestamp" # Include processing timestamp
         )
 
@@ -164,7 +181,7 @@ def process_batch_with_model(batch_df, batch_id):
         # Cassandra uses primary key 'id' to handle upserts (no duplicates)
         output_prepared_df.write \
             .format("org.apache.spark.sql.cassandra") \
-            .mode("append") # Append means insert or update based on PK
+            .mode("append") \
             .options(table=CASSANDRA_PREDICTED_TABLE, keyspace=CASSANDRA_PREDICTED_KEYSPACE) \
             .save()
 

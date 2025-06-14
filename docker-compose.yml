@@ -35,17 +35,18 @@ services:
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_LOG_RETENTION_HOURS: 72 # Keep messages for 3 days
+      KAFKA_LOG_RETENTION_BYTES: 5368709120 # Max 5GB per partition
+      KAFKA_LOG_CLEANUP_POLICY: delete # Ensure it's set to delete old segments
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_DELETE_TOPIC_ENABLE: "true"
     networks:
       - spark-net
     depends_on:
       zookeeper:
         condition: service_healthy
-    # healthcheck: # ADDED HEALTHCHECK FOR KAFKA HERE
-    #   test: ["CMD-SHELL", "kafka-broker-api-versions.sh --bootstrap-server localhost:9092 || exit 1"]
-    #   interval: 10s
-    #   timeout: 5s
-    #   retries: 10 # Kafka can take a bit to start up, increased retries
-    #   start_period: 60s # Give it initial time to start before checking
+    volumes:
+      - kafka_data:/var/lib/kafka/data
 
   # --- Cassandra Database ---
   cassandra:
@@ -182,6 +183,136 @@ services:
       - ./spark_jobs:/opt/bitnami/spark/jobs
       - ./data:/opt/bitnami/spark/data
 
+  # --- Spark Worker 4 ---
+  spark-worker-4: # New worker service
+    build:
+      context: .
+      dockerfile: dockerfiles/spark/Dockerfile
+      args:
+        SPARK_VERSION: 3.5.0
+        SPARK_SCALA_VERSION: 2.12
+    hostname: spark-worker-4
+    container_name: spark-worker-4
+    command: bin/spark-class org.apache.spark.deploy.worker.Worker spark://spark-master:7077
+    environment:
+      SPARK_MODE: worker
+      SPARK_MASTER_URL: spark://spark-master:7077
+      SPARK_WORKER_CORES: 1
+      SPARK_WORKER_MEMORY: 2G
+      SPARK_RPC_AUTHENTICATION_ENABLED: "no"
+      SPARK_RPC_ENCRYPTION_ENABLED: "no"
+      SPARK_LOCAL_DIRS: /tmp/spark
+      SPARK_LOG_LEVEL: INFO
+    networks:
+      - spark-net
+    volumes:
+      - ./spark_jobs:/opt/bitnami/spark/jobs
+      - ./data:/opt/bitnami/spark/data
+    
+  # --- Spark Worker 5 ---
+  spark-worker-5: # New worker service
+    build:
+      context: .
+      dockerfile: dockerfiles/spark/Dockerfile
+      args:
+        SPARK_VERSION: 3.5.0
+        SPARK_SCALA_VERSION: 2.12
+    hostname: spark-worker-5
+    container_name: spark-worker-5
+    command: bin/spark-class org.apache.spark.deploy.worker.Worker spark://spark-master:7077
+    environment:
+      SPARK_MODE: worker
+      SPARK_MASTER_URL: spark://spark-master:7077
+      SPARK_WORKER_CORES: 1
+      SPARK_WORKER_MEMORY: 2G
+      SPARK_RPC_AUTHENTICATION_ENABLED: "no"
+      SPARK_RPC_ENCRYPTION_ENABLED: "no"
+      SPARK_LOCAL_DIRS: /tmp/spark
+      SPARK_LOG_LEVEL: INFO
+    networks:
+      - spark-net
+    volumes:
+      - ./spark_jobs:/opt/bitnami/spark/jobs
+      - ./data:/opt/bitnami/spark/data
+
+  # --- Spark Worker 6 ---
+  spark-worker-6: # New worker service
+    build:
+      context: .
+      dockerfile: dockerfiles/spark/Dockerfile
+      args:
+        SPARK_VERSION: 3.5.0
+        SPARK_SCALA_VERSION: 2.12
+    hostname: spark-worker-6
+    container_name: spark-worker-6
+    command: bin/spark-class org.apache.spark.deploy.worker.Worker spark://spark-master:7077
+    environment:
+      SPARK_MODE: worker
+      SPARK_MASTER_URL: spark://spark-master:7077
+      SPARK_WORKER_CORES: 1
+      SPARK_WORKER_MEMORY: 2G
+      SPARK_RPC_AUTHENTICATION_ENABLED: "no"
+      SPARK_RPC_ENCRYPTION_ENABLED: "no"
+      SPARK_LOCAL_DIRS: /tmp/spark
+      SPARK_LOG_LEVEL: INFO
+    networks:
+      - spark-net
+    volumes:
+      - ./spark_jobs:/opt/bitnami/spark/jobs
+      - ./data:/opt/bitnami/spark/data
+
+  # --- Spark Worker 7 ---
+  spark-worker-7: # New worker service
+    build:
+      context: .
+      dockerfile: dockerfiles/spark/Dockerfile
+      args:
+        SPARK_VERSION: 3.5.0
+        SPARK_SCALA_VERSION: 2.12
+    hostname: spark-worker-7
+    container_name: spark-worker-7
+    command: bin/spark-class org.apache.spark.deploy.worker.Worker spark://spark-master:7077
+    environment:
+      SPARK_MODE: worker
+      SPARK_MASTER_URL: spark://spark-master:7077
+      SPARK_WORKER_CORES: 1
+      SPARK_WORKER_MEMORY: 2G
+      SPARK_RPC_AUTHENTICATION_ENABLED: "no"
+      SPARK_RPC_ENCRYPTION_ENABLED: "no"
+      SPARK_LOCAL_DIRS: /tmp/spark
+      SPARK_LOG_LEVEL: INFO
+    networks:
+      - spark-net
+    volumes:
+      - ./spark_jobs:/opt/bitnami/spark/jobs
+      - ./data:/opt/bitnami/spark/data
+
+  # --- Spark Worker 8 ---
+  spark-worker-8: # New worker service
+    build:
+      context: .
+      dockerfile: dockerfiles/spark/Dockerfile
+      args:
+        SPARK_VERSION: 3.5.0
+        SPARK_SCALA_VERSION: 2.12
+    hostname: spark-worker-8
+    container_name: spark-worker-8
+    command: bin/spark-class org.apache.spark.deploy.worker.Worker spark://spark-master:7077
+    environment:
+      SPARK_MODE: worker
+      SPARK_MASTER_URL: spark://spark-master:7077
+      SPARK_WORKER_CORES: 1
+      SPARK_WORKER_MEMORY: 2G
+      SPARK_RPC_AUTHENTICATION_ENABLED: "no"
+      SPARK_RPC_ENCRYPTION_ENABLED: "no"
+      SPARK_LOCAL_DIRS: /tmp/spark
+      SPARK_LOG_LEVEL: INFO
+    networks:
+      - spark-net
+    volumes:
+      - ./spark_jobs:/opt/bitnami/spark/jobs
+      - ./data:/opt/bitnami/spark/data
+
   spark-train-ingestion:
     image: bitnami/spark:3.5.0
     container_name: spark-train-ingestion
@@ -269,3 +400,4 @@ networks:
 
 volumes:
   cassandra_data: # For Cassandra persistent data
+  kafka_data:

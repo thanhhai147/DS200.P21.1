@@ -71,7 +71,7 @@ query_cassandra_sink = parsed_df.writeStream \
     .format("org.apache.spark.sql.cassandra") \
     .options(table=CASSANDRA_TABLE, keyspace=CASSANDRA_KEYSPACE) \
     .option("checkpointLocation", os.path.join("/tmp/spark/checkpoints", KAFKA_SOURCE_TOPIC + "_to_cassandra")) \
-    .trigger(processingTime="10 seconds") \
+    .trigger(processingTime="20 seconds") \
     .start()
 
 logger.info("Spark Structured Streaming query for Kafka to Cassandra ingestion started.")

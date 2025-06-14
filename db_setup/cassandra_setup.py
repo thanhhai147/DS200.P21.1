@@ -67,7 +67,7 @@ def create_cassandra_schema():
                 predicted_label_index int,
                 predicted_sentiment_string text,
                 positive_probability double,
-                rawPrediction text,
+                raw_prediction text,
                 processing_timestamp timestamp
             );
             """
