@@ -9,7 +9,7 @@ docker system prune -a
 docker-compose up -d --build
 
 echo "--- Waiting for core services (Kafka, Cassandra, Spark Master) to be healthy ---"
-for i in {1..5}; do 
+for i in {1..3}; do 
   KAFKA_HEALTH=$(docker-compose inspect --format '{{.State.Health.Status}}' kafka 2>/dev/null)
   CASSANDRA_HEALTH=$(docker-compose inspect --format '{{.State.Health.Status}}' cassandra 2>/dev/null)
   echo "$KAFKA_HEALTH"
@@ -19,7 +19,7 @@ for i in {1..5}; do
     echo "Kafka and Cassandra are healthy!"
     break
   fi
-  echo "Waiting for services to be healthy... ($i/5)"
+  echo "Waiting for services to be healthy... ($i/3)"
   sleep 5
 done
 

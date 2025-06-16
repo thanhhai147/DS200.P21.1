@@ -34,12 +34,13 @@ services:
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
-      KAFKA_LOG_RETENTION_HOURS: 72 # Keep messages for 3 days
-      KAFKA_LOG_RETENTION_BYTES: 5368709120 # Max 5GB per partition
+      # KAFKA_LOG_RETENTION_HOURS: 72 # Keep messages for 3 days
+      KAFKA_LOG_RETENTION_BYTES: 10737418240  # Max 10GB per partition
       KAFKA_LOG_CLEANUP_POLICY: delete # Ensure it's set to delete old segments
-      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
-      KAFKA_DELETE_TOPIC_ENABLE: "true"
+      KAFKA_LOG_CLEANER_ENABLE: "true"
     networks:
       - spark-net
     depends_on:
@@ -320,6 +321,8 @@ services:
       - SPARK_MASTER_URL=spark://spark-master:7077
     volumes:
       - ./spark_jobs:/opt/bitnami/spark/jobs
+      - spark_local_data:/opt/spark_temp_data
+      - spark_checkpoints_volume:/tmp/spark/checkpoints
     networks:
       - spark-net
     restart: on-failure
@@ -331,6 +334,8 @@ services:
       - SPARK_MASTER_URL=spark://spark-master:7077
     volumes:
       - ./spark_jobs:/opt/bitnami/spark/jobs
+      - spark_local_data:/opt/spark_temp_data
+      - spark_checkpoints_volume:/tmp/spark/checkpoints
     networks:
       - spark-net
     restart: on-failure
@@ -342,6 +347,8 @@ services:
       - SPARK_MASTER_URL=spark://spark-master:7077
     volumes:
       - ./spark_jobs:/opt/bitnami/spark/jobs
+      - spark_local_data:/opt/spark_temp_data
+      - spark_checkpoints_volume:/tmp/spark/checkpoints
     networks:
       - spark-net
     restart: on-failure
@@ -401,3 +408,5 @@ networks:
 volumes:
   cassandra_data: # For Cassandra persistent data
   kafka_data:
+  spark_local_data:
+  spark_checkpoints_volume:

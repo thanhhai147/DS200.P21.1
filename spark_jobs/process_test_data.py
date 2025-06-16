@@ -14,19 +14,6 @@ import time # For checking file modification time
 from pyspark.ml.linalg import Vector # Make sure this import is present at the top
 # from pyspark.sql.types import DoubleType # For the UDF return type (already imported above)
 
-# Define a UDF to extract the positive probability (assuming it's at index 1)
-# This UDF will receive the pyspark.ml.linalg.Vector object directly
-@udf(DoubleType())
-def get_positive_probability_udf(vec: Vector) -> float:
-    if vec is None:
-        return None
-    # Assuming the positive class probability is at index 1 of the probability vector
-    # Spark ML classifiers typically output probabilities for each class,
-    # with the index corresponding to the indexed label (e.g., 0 for negative, 1 for positive, 2 for neutral)
-    if len(vec) > 1: # Ensure the vector has at least two elements
-        return float(vec[1])
-    return None # Or handle as appropriate if vector is too short
-
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -37,6 +24,8 @@ spark = SparkSession.builder \
     .appName("KafkaTestDataProcessorAndPredictor") \
     .config("spark.jars.packages", SPARK_PACKAGES) \
     .config("spark.cassandra.connection.host", "cassandra") \
+    .config("spark.local.dir", "/opt/spark_temp_data") \
+    .config("spark.sql.streaming.checkpointLocation", "/tmp/spark/checkpoints") \
     .getOrCreate()
 
 spark.sparkContext.setLogLevel("WARN")
@@ -218,7 +207,7 @@ def process_batch_with_model(batch_df, batch_id):
 query_test_processor = parsed_test_df.writeStream \
     .foreachBatch(process_batch_with_model) \
     .option("checkpointLocation", os.path.join("/tmp/spark/checkpoints", RAW_TEST_TOPIC + "_processor_checkpoint")) \
-    .trigger(processingTime="5 seconds") \
+    .trigger(processingTime="60 seconds") \
     .start()
 
 logger.info("Spark Structured Streaming query for Test Data Processor started.")

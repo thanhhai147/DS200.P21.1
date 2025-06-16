@@ -1,4 +1,4 @@
-# api_producer/app.py (REVISED for Automatic, Mini-Batch Production from CSVs)
+# api_producer/app.py (REVISED for Automatic, Mini-Batch Production from CSVs in separate threads)
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 import pandas as pd
@@ -34,11 +34,16 @@ producer_instance = None
 producer_connected = False
 
 # --- Global DataFrames and Pointers for Continuous Looping ---
-train_df = None
-test_df = None
+# These will be loaded once at startup and accessed by the threads
+train_df = pd.DataFrame() # Initialize as empty to prevent NoneType errors before load
+test_df = pd.DataFrame()   # Initialize as empty
 train_data_idx = 0
 test_data_idx = 0
-data_production_active = True # Flag to control the background thread
+data_production_active = True # Flag to control the background threads
+
+# --- Constants for Production Logic ---
+BATCH_SIZE = 1024
+DELAY_BETWEEN_BATCHES_SECONDS = 20 # Adjust as needed
 
 # --- Kafka Producer Setup ---
 def get_kafka_producer_with_retries(max_retries=15, delay_seconds=20):
@@ -47,35 +52,36 @@ def get_kafka_producer_with_retries(max_retries=15, delay_seconds=20):
     This helps handle Kafka not being fully ready immediately on container startup.
     """
     global producer_instance, producer_connected
-    if producer_instance is None or not producer_connected:
-        retries = 0
-        while retries < max_retries:
-            try:
-                logger.info(f"Attempt {retries + 1}/{max_retries}: Connecting Kafka Producer to {KAFKA_BOOTSTRAP_SERVERS}...")
-                new_producer = KafkaProducer(
-                    bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
-                    value_serializer=lambda v: json.dumps(v).encode('utf-8'),
-                    acks='all'
-                )
-                new_producer.metrics() # Force a connection check
-                producer_instance = new_producer
-                producer_connected = True
-                logger.info(f"Successfully connected Kafka Producer to {KAFKA_BOOTSTRAP_SERVERS}")
-                return producer_instance
-            except Exception as e:
-                retries += 1
-                logger.warning(f"Error connecting Kafka Producer: {e}. Retrying in {delay_seconds} seconds...")
-                time.sleep(delay_seconds)
-        logger.error(f"Failed to connect Kafka Producer after {max_retries} retries. Data production will not start.")
-        producer_connected = False
-        return None
-    return producer_instance
+    if producer_instance is not None and producer_connected:
+        return producer_instance # Already connected
+
+    retries = 0
+    while retries < max_retries:
+        try:
+            logger.info(f"Attempt {retries + 1}/{max_retries}: Connecting Kafka Producer to {KAFKA_BOOTSTRAP_SERVERS}...")
+            new_producer = KafkaProducer(
+                bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
+                value_serializer=lambda v: json.dumps(v).encode('utf-8'),
+                acks='all'
+            )
+            new_producer.metrics() # Force a connection check
+            producer_instance = new_producer
+            producer_connected = True
+            logger.info(f"Successfully connected Kafka Producer to {KAFKA_BOOTSTRAP_SERVERS}")
+            return producer_instance
+        except Exception as e:
+            retries += 1
+            logger.warning(f"Error connecting Kafka Producer: {e}. Retrying in {delay_seconds} seconds...")
+            time.sleep(delay_seconds)
+    logger.error(f"Failed to connect Kafka Producer after {max_retries} retries. Data production will not start.")
+    producer_connected = False
+    return None
 
 # --- Data Production Logic ---
 def send_data_batch_to_kafka(df_source: pd.DataFrame, current_idx: int, topic: str, batch_size: int):
     """
     Sends a mini-batch of data from a DataFrame to a Kafka topic.
-    Returns the next starting index for the DataFrame.
+    Returns the next starting index for the DataFrame and records sent count.
     """
     global producer_instance, producer_connected
 
@@ -101,7 +107,12 @@ def send_data_batch_to_kafka(df_source: pd.DataFrame, current_idx: int, topic: s
             # logger.debug(f"Produced record {data_dict['id']} to {topic}")
         except Exception as e:
             logger.error(f"Failed to send message to {topic}: {e}. Attempting to re-initialize producer.")
-            producer_instance = get_kafka_producer_with_retries() # Try to re-initialize
+            # Only try to re-initialize if not already trying or if a connection was lost
+            if not producer_connected: # Check if flag was set to False by previous failure
+                producer_instance = get_kafka_producer_with_retries()
+            else: # Connection might have been lost without flag update, try a quick reconnect
+                producer_instance = get_kafka_producer_with_retries(max_retries=1, delay_seconds=1)
+            
             if not producer_connected:
                 logger.error("Could not re-initialize producer. Stopping data production.")
                 data_production_active = False # Signal to stop production thread
@@ -116,85 +127,131 @@ def send_data_batch_to_kafka(df_source: pd.DataFrame, current_idx: int, topic: s
 
     return next_idx, records_sent
 
-def continuous_data_production_task():
+def train_data_production_task():
     """
-    Background task to continuously read data from CSVs and send to Kafka.
+    Background task to continuously read data from Train.csv and send to RAW_TRAIN_TOPIC.
     """
-    global train_df, test_df, train_data_idx, test_data_idx, data_production_active
+    global train_df, train_data_idx, data_production_active
 
-    logger.info("Starting continuous data production background task.")
+    logger.info("Starting train data production background task.")
 
-    # Load data once at startup
+    if train_df.empty:
+        logger.warning("Train data DataFrame is empty. Train data production task terminating.")
+        return
+
+    # Ensure Kafka producer is ready before starting the loop
+    # It's initialized in startup_event, but a quick check here too.
+    if not producer_connected:
+        logger.error("Kafka producer is not connected for train data. Aborting train data production task.")
+        return
+
+    while data_production_active:
+        if not train_df.empty:
+            train_data_idx, sent_count = send_data_batch_to_kafka(train_df, train_data_idx, RAW_TRAIN_TOPIC, BATCH_SIZE)
+            if sent_count > 0:
+                logger.debug(f"Train data batch sent. Next train index: {train_data_idx}")
+            else:
+                logger.debug("No train data sent in this batch.")
+        else:
+            logger.debug("Train data DataFrame is empty.") # Should not happen if check above is passed
+
+        time.sleep(DELAY_BETWEEN_BATCHES_SECONDS)
+    
+    logger.info("Train data production background task stopped.")
+
+def test_data_production_task():
+    """
+    Background task to continuously read data from Test.csv and send to RAW_TEST_TOPIC.
+    """
+    global test_df, test_data_idx, data_production_active
+
+    logger.info("Starting test data production background task.")
+
+    if test_df.empty:
+        logger.warning("Test data DataFrame is empty. Test data production task terminating.")
+        return
+    
+    # Ensure Kafka producer is ready before starting the loop
+    if not producer_connected:
+        logger.error("Kafka producer is not connected for test data. Aborting test data production task.")
+        return
+
+    while data_production_active:
+        if not test_df.empty:
+            test_data_idx, sent_count = send_data_batch_to_kafka(test_df, test_data_idx, RAW_TEST_TOPIC, BATCH_SIZE)
+            if sent_count > 0:
+                logger.debug(f"Test data batch sent. Next test index: {test_data_idx}")
+            else:
+                logger.debug("No test data sent in this batch.")
+        else:
+            logger.debug("Test data DataFrame is empty.") # Should not happen if check above is passed
+
+        time.sleep(DELAY_BETWEEN_BATCHES_SECONDS)
+    
+    logger.info("Test data production background task stopped.")
+
+
+# --- FastAPI Event Handlers ---
+@app.on_event("startup")
+async def startup_event():
+    global train_df, test_df, producer_instance, producer_connected, data_production_active
+    logger.info("Data Source API starting up...")
+
+    # --- Load DataFrames once in the main thread ---
     train_file_path = os.path.join(DATA_PATH, 'Train.csv')
     test_file_path = os.path.join(DATA_PATH, 'Test.csv')
 
     try:
         train_df = pd.read_csv(train_file_path)
-        logger.info(f"Loaded {len(train_df)} records from Train.csv for training data production.")
+        logger.info(f"Loaded {len(train_df)} records from Train.csv.")
     except Exception as e:
         logger.error(f"Failed to load Train.csv: {e}. Train data production will not occur.", exc_info=True)
         train_df = pd.DataFrame() # Empty DataFrame to prevent errors
 
     try:
         test_df = pd.read_csv(test_file_path)
-        logger.info(f"Loaded {len(test_df)} records from Test.csv for test data production.")
+        logger.info(f"Loaded {len(test_df)} records from Test.csv.")
     except Exception as e:
         logger.error(f"Failed to load Test.csv: {e}. Test data production will not occur.", exc_info=True)
         test_df = pd.DataFrame() # Empty DataFrame to prevent errors
     
     if train_df.empty and test_df.empty:
-        logger.error("No data loaded from CSVs. Continuous production task terminating.")
-        data_production_active = False
+        logger.error("No data loaded from CSVs. Continuous production tasks terminating.")
+        data_production_active = False # Immediately set to false if no data
         return
 
-    # Ensure Kafka producer is ready before starting the loop
-    get_kafka_producer_with_retries()
+    # --- Initialize Kafka producer once ---
+    # Attempt to get producer, if fails, set data_production_active to False
+    producer_instance = get_kafka_producer_with_retries()
     if not producer_connected:
-        logger.error("Kafka producer is not connected. Aborting data production task.")
+        logger.error("Kafka producer is not connected. Aborting data production tasks.")
+        data_production_active = False # Abort if producer not connected
         return
 
-    BATCH_SIZE = 16
-    DELAY_BETWEEN_BATCHES_SECONDS = 20 # Adjust as needed
+    # --- Start independent production threads ---
+    if not train_df.empty:
+        train_production_thread = threading.Thread(target=train_data_production_task)
+        train_production_thread.daemon = True # Allow main program to exit if FastAPI app shuts down
+        train_production_thread.start()
+        logger.info("Train data production task started in background.")
+    else:
+        logger.warning("Train data DataFrame is empty. Skipping train data production thread.")
 
-    while data_production_active:
-        if not train_df.empty:
-            train_data_idx, sent_count = send_data_batch_to_kafka(train_df, train_data_idx, RAW_TRAIN_TOPIC, BATCH_SIZE)
-            if sent_count > 0:
-                logger.info(f"Train data batch sent. Next train index: {train_data_idx}")
-            else:
-                logger.debug("No train data sent in this batch.")
-        else:
-            logger.debug("Train data DataFrame is empty.")
+    if not test_df.empty:
+        test_production_thread = threading.Thread(target=test_data_production_task)
+        test_production_thread.daemon = True # Allow main program to exit if FastAPI app shuts down
+        test_production_thread.start()
+        logger.info("Test data production task started in background.")
+    else:
+        logger.warning("Test data DataFrame is empty. Skipping test data production thread.")
 
-        if not test_df.empty:
-            test_data_idx, sent_count = send_data_batch_to_kafka(test_df, test_data_idx, RAW_TEST_TOPIC, BATCH_SIZE)
-            if sent_count > 0:
-                logger.info(f"Test data batch sent. Next test index: {test_data_idx}")
-            else:
-                logger.debug("No test data sent in this batch.")
-        else:
-            logger.debug("Test data DataFrame is empty.")
-
-        time.sleep(DELAY_BETWEEN_BATCHES_SECONDS)
-    
-    logger.info("Data production background task stopped.")
-
-
-# --- FastAPI Event Handlers ---
-@app.on_event("startup")
-async def startup_event():
-    logger.info("Data Source API starting up...")
-    # Start the continuous data production in a separate thread
-    production_thread = threading.Thread(target=continuous_data_production_task)
-    production_thread.daemon = True # Allow main program to exit if Flask app shuts down
-    production_thread.start()
-    logger.info("Continuous data production task started in background.")
+    logger.info("All relevant data production tasks initiated.")
 
 @app.on_event("shutdown")
 async def shutdown_event():
     global data_production_active
-    logger.info("Data Source API shutting down. Signaling production task to stop...")
-    data_production_active = False # Signal the background thread to stop
+    logger.info("Data Source API shutting down. Signaling production tasks to stop...")
+    data_production_active = False # Signal the background threads to stop
     # Give it a moment to finish current work, then force flush/close
     time.sleep(2) 
     if producer_instance:

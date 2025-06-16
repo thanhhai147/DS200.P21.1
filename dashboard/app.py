@@ -90,7 +90,7 @@ if predictions_consumer:
             if predictions_list:
                 df_predictions = pd.DataFrame(list(predictions_list))
                 # Select and reorder columns for display
-                display_cols = ['processing_timestamp', 'comment', 'n_star', 'label', 'predicted_sentiment_string', 'positive_probability']
+                display_cols = ['processing_timestamp', 'comment', 'n_star', 'label', 'predicted_sentiment_string']
                 df_predictions = df_predictions[display_cols]
                 predictions_container.dataframe(df_predictions, use_container_width=True, hide_index=True)
             else:

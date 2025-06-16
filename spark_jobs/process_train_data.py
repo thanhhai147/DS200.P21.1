@@ -18,6 +18,8 @@ spark = SparkSession.builder \
     .appName("KafkaToCassandraTrainingIngestion") \
     .config("spark.jars.packages", SPARK_PACKAGES) \
     .config("spark.cassandra.connection.host", "cassandra") \
+    .config("spark.local.dir", "/opt/spark_temp_data") \
+    .config("spark.sql.streaming.checkpointLocation", "/tmp/spark/checkpoints") \
     .getOrCreate()
 
 spark.sparkContext.setLogLevel("WARN") # Keep Spark's internal logs concise
