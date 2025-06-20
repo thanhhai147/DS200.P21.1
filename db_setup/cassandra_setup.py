@@ -13,9 +13,8 @@ CASSANDRA_PORT = 9042
 CASSANDRA_USER = None
 CASSANDRA_PASSWORD = None
 
-KEYSPACE_NAME = "my_project_keyspace"
+KEYSPACE_NAME = "bigdata_keyspace"
 TRAIN_DATA_TABLE = "raw_train_data"
-TEST_DATA_TABLE = "predicted_data_results"
 
 def create_cassandra_schema():
     cluster = None
@@ -55,24 +54,6 @@ def create_cassandra_schema():
             """
             session.execute(train_table_query)
             logger.info(f"Table '{TRAIN_DATA_TABLE}' created or already exists.")
-
-            # Create raw_test_data table
-            test_table_query = f"""
-            CREATE TABLE IF NOT EXISTS {TEST_DATA_TABLE} (
-                id UUID PRIMARY KEY,
-                comment text,
-                n_star int,
-                date_time timestamp,
-                label text,
-                predicted_label_index int,
-                predicted_sentiment_string text,
-                positive_probability double,
-                raw_prediction text,
-                processing_timestamp timestamp
-            );
-            """
-            session.execute(test_table_query)
-            logger.info(f"Table '{TEST_DATA_TABLE}' created or already exists.")
 
             logger.info("Cassandra schema setup complete!")
             return # Success, exit function

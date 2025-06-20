@@ -1,5 +1,4 @@
 # spark_jobs/process_test_data.py (UPDATED for Dynamic Model Reloading and Metrics)
-
 from pyspark.sql import SparkSession
 import pyspark.sql.functions as F
 from pyspark.sql.functions import from_json, col, current_timestamp, udf
@@ -12,7 +11,6 @@ import uuid
 import os
 import time # For checking file modification time
 from pyspark.ml.linalg import Vector # Make sure this import is present at the top
-# from pyspark.sql.types import DoubleType # For the UDF return type (already imported above)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -37,8 +35,8 @@ KAFKA_BOOTSTRAP_SERVERS = "kafka:29092"
 RAW_TEST_TOPIC = "raw_test_data"
 PREDICTED_KAFKA_TOPIC = "predicted_test_data"
 REALTIME_METRICS_TOPIC = "realtime_metrics"
-CASSANDRA_PREDICTED_KEYSPACE = "my_project_keyspace"
-CASSANDRA_PREDICTED_TABLE = "predicted_data_results"
+CASSANDRA_TRAIN_KEYSPACE = "bigdata_keyspace"
+CASSANDRA_TRAIN_TABLE = "raw_train_data"
 
 # --- Global variable to hold the model and its last loaded timestamp ---
 # This allows us to reload the model periodically
@@ -150,10 +148,18 @@ def process_batch_with_model(batch_df, batch_id):
             F.col("prediction").cast(IntegerType()).alias("predicted_label_index"),
             F.col("predicted_composite_label").alias("predicted_sentiment_string"), # Human-readable predicted label
             F.col("rawPrediction").cast(StringType()).alias("raw_prediction"), # Convert vector to string for Cassandra
-            # Using the new UDF for positive_probability
-            # get_positive_probability_udf(F.col("probability")).alias("positive_probability"),
             "processing_timestamp" # Include processing timestamp
         )
+
+        retrain_df = batch_df.withColumnRenamed("processing_timestamp", "ingestion_timestamp") \
+            .select(
+                "id",
+                "comment",
+                "n_star",
+                "date_time",
+                "label",
+                "ingestion_timestamp"
+            )
 
         # --- Write Predictions to Kafka ---
         logger.info(f"Batch {batch_id}: Writing predictions to Kafka topic: {PREDICTED_KAFKA_TOPIC}")
@@ -165,13 +171,13 @@ def process_batch_with_model(batch_df, batch_id):
             .option("topic", PREDICTED_KAFKA_TOPIC) \
             .save() # Use .save() for batch writes within foreachBatch
 
-        # --- Write Predictions to Cassandra ---
-        logger.info(f"Batch {batch_id}: Writing predictions to Cassandra: {CASSANDRA_PREDICTED_KEYSPACE}.{CASSANDRA_PREDICTED_TABLE}")
+        # --- Write test data to Cassandra ---
+        logger.info(f"Batch {batch_id}: Writing test data to Cassandra: {CASSANDRA_TRAIN_KEYSPACE}.{CASSANDRA_TRAIN_TABLE}")
         # Cassandra uses primary key 'id' to handle upserts (no duplicates)
-        output_prepared_df.write \
+        retrain_df.write \
             .format("org.apache.spark.sql.cassandra") \
             .mode("append") \
-            .options(table=CASSANDRA_PREDICTED_TABLE, keyspace=CASSANDRA_PREDICTED_KEYSPACE) \
+            .options(table=CASSANDRA_TRAIN_TABLE, keyspace=CASSANDRA_TRAIN_KEYSPACE) \
             .save()
 
         # --- Real-time Metrics Calculation and Output ---

@@ -29,7 +29,7 @@ spark.sparkContext.setLogLevel("WARN")
 logger.info("Spark Session for Continuous Model Trainer created.")
 
 # --- Configuration Variables ---
-CASSANDRA_KEYSPACE = "my_project_keyspace"
+CASSANDRA_KEYSPACE = "bigdata_keyspace"
 CASSANDRA_TRAIN_TABLE = "raw_train_data"
 MODEL_SAVE_PATH = "/opt/bitnami/spark/jobs/model/sentiment_model" # Shared volume path
 
