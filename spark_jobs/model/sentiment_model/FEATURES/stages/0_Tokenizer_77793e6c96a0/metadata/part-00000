@@ -1,0 +1,1 @@
+{"class":"org.apache.spark.ml.feature.Tokenizer","timestamp":1751015742867,"sparkVersion":"3.5.0","uid":"Tokenizer_77793e6c96a0","paramMap":{"outputCol":"words","inputCol":"comment"},"defaultParamMap":{"outputCol":"Tokenizer_77793e6c96a0__output"}}

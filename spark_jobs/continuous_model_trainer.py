@@ -1,166 +1,188 @@
-# spark_jobs/continuous_model_trainer.py
-
+# spark_jobs/continuous_model_trainer.py (with Retry Logic)
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, udf
-from pyspark.sql.types import StringType, TimestampType
+from pyspark.sql.functions import col, regexp_replace, explode, split, when, collect_list, array_contains, lit, expr
+from pyspark.sql import functions as F
 from pyspark.ml import Pipeline
 from pyspark.ml.classification import LogisticRegression
-from pyspark.ml.feature import HashingTF, IDF, Tokenizer, StringIndexer, IndexToString
-from pyspark.ml import PipelineModel
+from pyspark.ml.feature import HashingTF, IDF, Tokenizer, IndexToString
 import logging
 import os
 import shutil
-from datetime import datetime
+import fcntl  
+from contextlib import contextmanager
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 # --- Spark Session Configuration ---
 SPARK_PACKAGES = "com.datastax.spark:spark-cassandra-connector_2.12:3.5.0"
 spark = SparkSession.builder \
-    .appName("ContinuousSentimentModelTrainer") \
+    .appName("ContinuousMultiClassTrainer") \
     .config("spark.jars.packages", SPARK_PACKAGES) \
     .config("spark.cassandra.connection.host", "cassandra") \
     .config("spark.local.dir", "/opt/spark_temp_data") \
-    .config("spark.sql.streaming.checkpointLocation", "/tmp/spark/checkpoints") \
     .getOrCreate()
 
 spark.sparkContext.setLogLevel("WARN")
-logger.info("Spark Session for Continuous Model Trainer created.")
+logger.info("Spark Session for Continuous Multi-Class Model Trainer created.")
 
 # --- Configuration Variables ---
 CASSANDRA_KEYSPACE = "bigdata_keyspace"
 CASSANDRA_TRAIN_TABLE = "raw_train_data"
-MODEL_SAVE_PATH = "/opt/bitnami/spark/jobs/model/sentiment_model" # Shared volume path
+MODEL_SAVE_PATH = "/opt/bitnami/spark/jobs/model/sentiment_model"
+MODEL_TEMP_SAVE_PATH = "/opt/bitnami/spark/jobs/model/sentiment_model_temp"
+LOCK_FILE_NAME = "training.lock"
+LOCK_FILE_PATH = os.path.join(MODEL_SAVE_PATH, LOCK_FILE_NAME)
 
-# --- UDF to Normalize Labels (same as in train_model.py) ---
-@udf(StringType())
-def normalize_and_concat_labels(label_str):
-    if label_str is None:
-        return None
-    individual_labels = [s.strip() for s in label_str.split(';') if s.strip()]
-    if not individual_labels:
-        return None
-    return ";".join(sorted(list(set(individual_labels))))
+aspect_cols = ['BATTERY', 'CAMERA', 'DESIGN', 'FEATURES', 'GENERAL', 'PERFORMANCE', 'PRICE', 'SCREEN', 'SER&ACC', 'STORAGE', 'OTHERS']
+
+@contextmanager
+def file_lock(lock_file_path):
+    os.makedirs(MODEL_SAVE_PATH, exist_ok=True)
+    with open(lock_file_path, 'w') as lock_file:
+        fcntl.flock(lock_file, fcntl.LOCK_EX)  # Exclusive lock
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file, fcntl.LOCK_UN)
 
 # --- Main Training Logic ---
 def train_and_save_model(batch_df, batch_id):
-    """
-    This function is called for each micro-batch.
-    It will read ALL available training data from Cassandra and retrain the model.
-    """
-    logger.info(f"Batch {batch_id}: Triggering model retraining.")
+    with file_lock(LOCK_FILE_PATH):
 
-    try:
-        # Read ALL available training data from Cassandra for retraining
-        # This will include all historical data + newly ingested data since last training
+        logger.info(f"Batch {batch_id}: Triggering model retraining cycle.")
+
+        # 1. Read the complete training dataset from Cassandra
+        train_df = None
+        
+        logger.info(f"Batch {batch_id}: Reading training data from Cassandra.")
         train_df = spark.read \
             .format("org.apache.spark.sql.cassandra") \
             .options(table=CASSANDRA_TRAIN_TABLE, keyspace=CASSANDRA_KEYSPACE) \
             .load()
-        
-        # --- Data Sampling for Faster Testing (Optional, but good for frequent retraining) ---
-        # Consider a smaller sample if retraining is very frequent and dataset is large
-        SAMPLE_FRACTION = 1.0 # Use full dataset for production, 0.1 for rapid testing
-        if SAMPLE_FRACTION < 1.0:
-            train_df = train_df.sample(withReplacement=False, fraction=SAMPLE_FRACTION, seed=42)
+        # Force an action to ensure data is read and potential errors occur here
+        if train_df.head(1): # Try to fetch a single row to trigger the read
+            logger.info(f"Batch {batch_id}: Successfully read data from Cassandra.")
 
-        num_records_for_training = train_df.count()
-        if num_records_for_training == 0:
-            logger.warning(f"Batch {batch_id}: No training data available in Cassandra. Skipping retraining.")
+        if train_df is None: # If read failed and loop completed without break
+                logger.error(f"Batch {batch_id}: Training data DataFrame is None after retries. Skipping retraining.")
+                return
+
+        num_records = train_df.count()
+        if num_records == 0:
+            logger.warning(f"Batch {batch_id}: No training data in Cassandra after read. Skipping retraining.")
             return
 
-        logger.info(f"Batch {batch_id}: Training model using {num_records_for_training} records from Cassandra.")
+        logger.info(f"Batch {batch_id}: Starting training with {num_records} records.")
 
-        # Apply UDF to normalize and concatenate labels
-        train_df = train_df.withColumn("processed_label", normalize_and_concat_labels(col("label")))
-
-        # Define ML Pipeline stages
-        tokenizer = Tokenizer(inputCol="comment", outputCol="words")
-        hashing_tf = HashingTF(inputCol="words", outputCol="raw_features", numFeatures=1000) # numFeatures=1000 (reduced for faster training)
-        idf = IDF(inputCol="raw_features", outputCol="features")
-
-        # StringIndexer: Needs to be fitted on the current training data
-        label_indexer = StringIndexer(inputCol="processed_label", outputCol="indexed_label", handleInvalid="skip")
-        
-        # Logistic Regression model
-        lr = LogisticRegression(
-            featuresCol="features",
-            labelCol="indexed_label",
-            maxIter=10, # Keep maxIter low for frequent updates
-            probabilityCol="probability" # Explicitly request probability output
+        # 2. Pre-process Data: Create a single normalized label column
+        # Bước 1: Tách tất cả các label từ chuỗi label (dạng: "{BATTERY#Positive}{CAMERA#Negative}")
+        df_labels = train_df.withColumn(
+            "LabelList",
+            split(regexp_replace(col("label"), r"[{}]", ""), r";")
+        ).withColumn(
+            "LabelList",
+            expr("filter(LabelList, x -> x != '')")  # loại bỏ item rỗng
         )
 
-        # IndexToString: Converts numerical predictions back to original string labels.
-        label_converter = IndexToString(
-            inputCol="prediction",
-            outputCol="predicted_composite_label",
-            labels=label_indexer.fit(train_df).labels # Fit StringIndexer here to get labels for converter
-        )
+        # Bước 2: Explode LabelList thành từng dòng để xử lý
+        exploded_df = df_labels.withColumn("label_entry", explode(col("LabelList")))
 
-        # Build and Train the ML Pipeline
-        # NOTE: StringIndexer is fitted inside the pipeline.fit() call if it's included as an Estimator
-        # However, for label_converter to correctly map, we need the fitted label_indexer's labels.
-        # This is why it's fitted separately here.
-        # Alternatively, ensure the full pipeline includes the Estimator for StringIndexer.
-        # For simplicity and to ensure `label_converter` has the correct `labels` set during `fit`,
-        # it's common to fit the `StringIndexer` first, then pass its fitted labels to `IndexToString`.
-        # Corrected pipeline definition to ensure labels are passed correctly:
-        pipeline = Pipeline(stages=[tokenizer, hashing_tf, idf, label_indexer, lr, label_converter])
+        # Bước 3: Tách thành aspect và sentiment
+        split_df = exploded_df.withColumn("aspect", split(col("label_entry"), "#").getItem(0)) \
+                            .withColumn("sentiment", split(col("label_entry"), "#").getItem(1))
         
-        logger.info(f"Batch {batch_id}: Starting model training (pipeline.fit()).")
-        trained_model = pipeline.fit(train_df)
-        logger.info(f"Batch {batch_id}: Model training complete. PipelineModel fitted.")
+        # Bước 4: Chuyển sentiment thành số
+        sentiment_map = {"Negative": 1, "Neutral": 2, "Positive": 3}
+        sentiment_expr = F.create_map([lit(kv) for kv in sum(sentiment_map.items(), ())])
+        split_df = split_df.withColumn("sentiment_value", sentiment_expr.getItem(col("sentiment")))
 
-        # Extract only the prediction-relevant stages for saving
-        # These indices depend on the order in your pipeline definition.
-        # (tokenizer, hashing_tf, idf, label_indexer, lr, label_converter)
-        # Note: label_indexer (index 3) is a Transformer after fit.
-        # We need its 'labels' for IndexToString, which is part of the saved model.
-        prediction_stages = [
-            trained_model.stages[0], # tokenizer
-            trained_model.stages[1], # hashing_tf
-            trained_model.stages[2], # idf
-            trained_model.stages[4], # lr (LogisticRegressionModel)
-            trained_model.stages[5]  # label_converter (IndexToString)
-        ]
-        prediction_pipeline_model = PipelineModel(stages=prediction_stages)
+        # Bước 5: Pivot về dạng wide (mỗi aspect là 1 cột)
+        pivot_df = split_df.filter(col("aspect") != "OTHERS") \
+            .groupBy("comment") \
+            .pivot("aspect") \
+            .agg(F.first("sentiment_value"))
+        
+        # Bước 6: Xử lý riêng cột OTHERS (nếu xuất hiện thì là 1, ngược lại 0)
+        others_df = split_df.groupBy("comment") \
+            .agg(F.max(when(col("aspect") == "OTHERS", 1).otherwise(0)).alias("OTHERS"))
 
-        # Save the new model (overwriting the old one)
-        logger.info(f"Batch {batch_id}: Attempting to save new prediction model to {MODEL_SAVE_PATH}...")
-        try:
-            os.makedirs(os.path.dirname(MODEL_SAVE_PATH), exist_ok=True)
-            prediction_pipeline_model.write().overwrite().save(MODEL_SAVE_PATH)
-            logger.info(f"Batch {batch_id}: New prediction model saved successfully to {MODEL_SAVE_PATH}")
-        except Exception as e:
-            logger.error(f"Batch {batch_id}: Failed to save new model to {MODEL_SAVE_PATH}: {e}", exc_info=True)
-            # Re-raise if saving is critical, otherwise log and continue
-            raise e
+        # Bước 7: Gộp lại với các cột còn lại
+        comment_df = split_df.select("comment").distinct()
 
-    except Exception as e:
-        logger.error(f"Batch {batch_id}: Error during model retraining: {e}", exc_info=True)
-        # Continue to the next batch even if this one fails
+        processed_df = comment_df \
+            .join(pivot_df, on="comment", how="left") \
+            .join(others_df, on="comment", how="left")
 
-# A dummy stream to trigger the foreachBatch.
-# It doesn't read actual data, but acts as a trigger mechanism.
-# We'll use a rate source or a file source that is always available.
-# A rate source is best for demonstrating periodic triggers.
+        # Điền 0 vào các ô null (tức là không có aspect đó)
+        for aspect in aspect_cols:
+            processed_df = processed_df.withColumn(aspect, F.coalesce(col(aspect), lit(0)))
+
+        if processed_df.count() == 0:
+            logger.warning(f"Batch {batch_id}: No valid processed labels after normalization. Skipping retraining.")
+            return
+
+        for aspect in aspect_cols:
+            
+            if aspect not in processed_df.columns:
+                continue
+            # 3. Define the ML Pipeline for a Single Multi-Class Model
+            tokenizer = Tokenizer(inputCol="comment", outputCol="words")
+            hashing_tf = HashingTF(inputCol="words", outputCol="raw_features", numFeatures=3000)
+            idf = IDF(inputCol="raw_features", outputCol="tfidf_features")
+            lr = LogisticRegression(
+                featuresCol="tfidf_features",
+                labelCol=aspect,
+                maxIter=100,
+                predictionCol="prediction",
+                family="multinomial"
+            )
+            
+            pipeline = Pipeline(stages=[tokenizer, hashing_tf, idf, lr])
+
+            # 4. Fit the pipeline on the training data
+            logger.info(f"Batch {batch_id}: Fitting the {aspect} pipeline...")
+            pipeline_model = pipeline.fit(processed_df)
+            logger.info(f"Batch {batch_id}: {aspect} pipeline fitting complete.")
+
+            # 5. Save the Model Atomically
+            ASPECT_MODEL_TEMP_SAVE_PATH = os.path.join(MODEL_TEMP_SAVE_PATH, aspect)
+            ASPECT_MODEL_SAVE_PATH = os.path.join(MODEL_SAVE_PATH, aspect)
+            logger.info(f"Batch {batch_id}: Saving {aspect} model to temporary location: {ASPECT_MODEL_TEMP_SAVE_PATH}")
+                    
+            # Clean up previous temp dir if it exists
+            if os.path.exists(ASPECT_MODEL_TEMP_SAVE_PATH):
+                shutil.rmtree(ASPECT_MODEL_TEMP_SAVE_PATH)
+            
+            # Ensure parent directorys exists for temp save
+            os.makedirs(os.path.dirname(ASPECT_MODEL_TEMP_SAVE_PATH), exist_ok=True)
+            
+            pipeline_model.write().overwrite().save(ASPECT_MODEL_TEMP_SAVE_PATH)
+            logger.info(f"Batch {batch_id}: {aspect} model saved to temporary location successfully.")
+            
+            # Atomically replace the old model with the new one.
+            logger.info(f"Batch {batch_id}: Atomically replacing old model with new model.")
+            # Clean up old model if it exists
+            if os.path.exists(ASPECT_MODEL_SAVE_PATH):
+                shutil.rmtree(ASPECT_MODEL_SAVE_PATH)
+            os.rename(ASPECT_MODEL_TEMP_SAVE_PATH, ASPECT_MODEL_SAVE_PATH)
+            logger.info(f"Batch {batch_id}: New {aspect} model saved successfully to {ASPECT_MODEL_SAVE_PATH}")
+
+
+# --- Streaming Query Definition ---
 trigger_stream = spark.readStream \
     .format("rate") \
     .option("rowsPerSecond", 1) \
     .load()
 
-logger.info(f"Starting continuous model trainer. Model will retrain every 60 seconds.")
-# Use a processingTime trigger to retrain periodically
+logger.info("Starting continuous model trainer. A new training cycle will start every 5 minutes.")
 query_trainer = trigger_stream.writeStream \
     .foreachBatch(train_and_save_model) \
-    .option("checkpointLocation", "/tmp/spark/checkpoints/continuous_trainer_checkpoint") \
-    .trigger(processingTime="60 seconds") \
+    .option("checkpointLocation", "/tmp/spark/checkpoints/continuous_multiclass_trainer_checkpoint") \
+    .trigger(processingTime="300 seconds") \
     .start()
 
-logger.info("Continuous Model Trainer Streaming Query started.")
-
-# Await termination to keep the Spark application running
+logger.info("Continuous Multi-Class Trainer streaming query has started.")
 query_trainer.awaitTermination()
 
 spark.stop()
